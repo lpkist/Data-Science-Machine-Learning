@@ -1,0 +1,443 @@
+---
+title: "Breast Cancer Project"
+author: "Lucas Perondi Kist"
+output: pdf_document
+date: "2024-01-31"
+---
+
+# Introduction
+This report aims to provide application of the concepts learned in the courses Data Science: Machine Learning (from HarvardX) and Supervised Machine Learning (ME906, from Unicamp). Thus, it is presented an application on the dataset ```brca```, from the package ```dslabs```, with biopsy features for the classification of 569 malignant (cancer) and benign (not cancer) breast masses.
+
+The objective is to build a classifier that, based on the values of the features, tries to predict if a given breast mass is malignant or benign. For this purpose, GLMs and several machine learning models were adjusted, whose parameters were tuned on a training set maximizing the *F1* metric. After the training, all the models were evaluated on a test set and some were combined to build ensembles.
+# Dataset
+The dataset ```brca``` contains 569 rows and 30 features. The outcome ```y``` is a factor with two levels: "M" (malignant) and "B" (benign). The predictors are the mean, standard error and worst value of the following measurements on the slide:
+\begin{itemize}
+\item Radius: nucleus radius (mean of distances from the center to points on the perimeter);
+
+\item Texture: nucleus texture (standard deviation of grayscale values).
+
+\item Perimeter: nucleus perimeter.
+
+\item Area: nucleus area.
+
+\item Smoothness: nucleus smoothness (local variation in radius lengths).
+
+\item Compactness: nucleus compactness ($perimeter^2/area - 1$).
+
+\item Concavity: nucleus concavity (severity of concave portions of the contour).
+
+\item Concave\_pts: number of concave portions of the nucleus contour.
+
+\item Symmetry: nucleus symmetry.
+
+\item Fractal\_dim: nucleus fractal dimension ("coastline approximation" -1).
+\end{itemize}
+```{r libraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(matrixStats)
+library(tidyverse)
+library(caret)
+library(dslabs)
+library(knitr)
+library(GGally)
+library(MLmetrics)
+opts_chunk$set(eval = TRUE, warning = F, message = F,
+               fig.width = 7, fig.height = 7)
+
+```
+
+```{r}
+data(brca)
+brca <- data.frame(brca$x, y = factor(brca$y, 
+                                      levels = c("M", "B"))) %>%
+  tibble()
+#summary(brca) %>% kable()
+```
+
+# Pre-processing
+The ```brca``` dataset was divided into two sets: training and test, in a proportion of approximately 80\% and 20\%. Then, the predictors were standardized in each one.
+```{r}
+set.seed(3)
+test_idx <- createDataPartition(brca$y, times = 1, p = 0.2, list = F)
+train <- brca[-test_idx, ]
+test <- brca[test_idx, ]
+p <- ncol(brca)
+train[,1:(p-1)] <- apply(train[,1:(p-1)], 2,
+                                   function(x) scale(x))
+test[,1:(p-1)] <- apply(test[,1:(p-1)], 2,
+                                   function(x) scale(x))
+
+```
+
+# Descriptive Analysis
+The following analysis was done considering only the training set. The correlation of the features is shown below. Based on it, it is possible to see that there are some groups with very high correlation (>0.99) and, then, it is needed to select one from each group to improve the performance of the methods (especially in terms of computational time).
+```{r}
+my_image <- function(x, zlim = range(x), ...){
+  colors = rev(RColorBrewer::brewer.pal(9, "RdBu"))
+  cols <- 1:ncol(x)
+  rows <- 1:nrow(x)
+  image(cols, rows, t(x[rev(rows),,drop=FALSE]), xaxt = "n", yaxt = "n",
+        xlab="", ylab="",  col = colors, zlim = zlim, ...)
+  abline(h=rows + 0.5, v = cols + 0.5)
+  axis(side = 1, cols, colnames(x), las = 2)
+}
+
+my_image(cor(train[, 1:(p-1)]), zlim = c(-1,1))
+```
+
+The criteria used to select a feature from a group was to keep the one that has the biggest absolute value of the *t statistic*, that is, it is the predictor with the greater difference in the means of different outcomes. The first group is  "radius_mean", "perimeter_mean", "area_mean", "radius_worst", "perimeter_worst" and "area_worst". The correlation is shown below and the selected feature is "perimeter_worst".
+```{r}
+stat_t <- function(col){
+  t.test(col[train$y == "B"],
+       col[train$y == "M"])$statistic
+}
+stats_t <- apply(train[,1:(p-1)], 2, stat_t)
+my_image(cor(train[,c("radius_mean", 'perimeter_mean', 'area_mean',
+                  'radius_worst', 'perimeter_worst', 'area_worst')]),
+         zlim = c(-1, 1))
+which.max(abs(stats_t[c("radius_mean", 'perimeter_mean', 'area_mean',
+                  'radius_worst', 'perimeter_worst', 'area_worst')]))
+train <- train[, !colnames(train) %in% c("radius_mean", 'perimeter_mean',
+                                         'area_mean','radius_worst',
+                                         'area_worst')]
+```
+The second group is compactness_mean", "concavity_mean", "concave_pts_mean", "compactness_worst", "concavity_worst" and "concave_pts_worst". The correlation is shown below and the selected feature is "concave_pts_worst".
+```{r}
+my_image(cor(train[, c("compactness_mean", "concavity_mean",
+                       "concave_pts_mean", "compactness_worst",
+                       "concavity_worst", "concave_pts_worst")]),
+         zlim = c(-1,1))
+which.max(abs(stats_t[c("compactness_mean", "concavity_mean",
+                       "concave_pts_mean", "compactness_worst",
+                       "concavity_worst", "concave_pts_worst")]))
+train <- train[, !colnames(train) %in% 
+                 c("compactness_mean", "concavity_mean",
+                   "concave_pts_mean", "compactness_worst",
+                   "concavity_worst")]
+```
+
+The third group is  "radius_se", "perimeter_se" and "area_se". The correlation is shown below and the selected feature is "radius_se".
+```{r}
+my_image(cor(train[, c("radius_se", "perimeter_se",
+                       "area_se")]),
+         zlim = c(-1,1))
+which.max(abs(stats_t[c("radius_se", "perimeter_se",
+                       "area_se")]))
+train <- train[, !colnames(train) %in% 
+                 c("perimeter_se",
+                       "area_se")]
+
+```
+The fourth group is "texture_mean" and "texture_worst". The correlation is shown below and the selected feature is "texture_worst".
+```{r}
+my_image(cor(train[,c("texture_mean", "texture_worst")]), 
+         z = c(-1,1))
+which.max(abs(stats_t[c("texture_mean", "texture_worst")]))
+train <- train[, !colnames(train) %in% 
+                 c("texture_mean")]
+
+```
+After removing the highly correlated predictors referred to above, the 3 biggest correlations are the following. It is possible to note that, although they are still high, it is not needed to remove them from the features set. After this selection, the same predictors were kept in the test set.
+```{r}
+(cor(train[,1:17]) %>% data.frame(c1 = colnames(train)[1:17]) %>% 
+  pivot_longer(cols = 1:17, names_to = "c2", values_to = "cor") %>% 
+  filter(cor!=1) %>% 
+  arrange(-abs(cor)) %>% head())[c(1,3,5),] %>% kable()
+
+p <- ncol(train)
+test <- test[, colnames(test) %in% colnames(train)]
+```
+
+The boxplots of the remaining features by the value of the outcome are below. Based on them, it is possible to see there is a big difference in the values according to *y*. Thus, it is expected it is possible to build a good classifier based on them.
+```{r}
+train %>% pivot_longer(cols = 1:(p-1), names_to = "col",
+                       values_to = "value") %>% 
+  mutate(col = factor(col),
+         idx = factor((as.numeric(col)-1)%/%3)) %>% 
+  ggplot(aes(x = factor(col), y = value, fill = y))+
+  geom_boxplot()+
+  facet_wrap(~idx, scales = "free")+
+  theme_bw()
+```
+
+
+
+# Adjusting models
+The best tuning parameters of the models were selected based on the *F1* value. Then, a function that calculates it was defined and used to compute the *F1* for each combination of the tuning grid (when it was needed). Also, ```train.control``` is defined, which contains the details of the way the validation would be performed: a ten-fold cross-validation.
+```{r}
+f1 <- function(data, lev = NULL, model = NULL) {
+        f1_val <- MLmetrics::F1_Score(y_pred = data$pred,
+                                      y_true = data$obs,
+                                      positive = lev[1])
+        c(F1 = f1_val)
+}
+train.control <- trainControl(method = "cv",
+                              number = 10,
+                              p = 0.9,
+                              summaryFunction = f1)
+```
+## GLMs
+Firstly, Generalized Linear Models were adjusted using the link functions *logit*, *probit* and *cloglog*. The models were sequentially fitted to keep only the significant predictors and tested again to the original model to compare the fits (the deviance was compared to the difference of degrees of freedom). 
+```{r}
+logit <- glm(y ~ ., data = train, family = binomial(link = "logit"))
+coef(summary(logit)) %>% kable()
+logit2 <- glm(y ~ radius_se + smoothness_se + fractal_dim_se + texture_worst + perimeter_worst + concave_pts_worst + fractal_dim_worst,
+              data = train,
+              family = binomial(link = "logit"))
+coef(summary(logit2)) %>% kable()
+anova(logit2, logit)
+```
+
+```{r }
+probit <- glm(y ~ ., data = train, family = binomial(link = "probit"))
+coef(summary(logit)) %>% kable()
+probit2 <- glm(y ~ radius_se + smoothness_se + fractal_dim_se + texture_worst + perimeter_worst + concave_pts_worst + fractal_dim_worst,
+               data = train, family = binomial(link = "probit"))
+coef(summary(probit2))
+anova(probit2, probit)
+```
+
+```{r}
+cloglog <- glm(y ~ ., data = train, family = binomial(link = "cloglog"))
+cloglog2 <- glm(y ~ radius_se + smoothness_se + fractal_dim_se + texture_worst + perimeter_worst + concave_pts_worst + fractal_dim_worst,
+                data = train, family = binomial(link = "cloglog"))
+coef(summary(cloglog2))
+anova(cloglog2, cloglog)
+
+```
+## LDA and QDA
+All the other models were fitted using the ````caret::train```function, which performs a ten-fold cross-validation. Then, Linear and Quadratic Discriminant Analyses were done. The results were saved and the values of *F1* after the validation are shown in the table below. 
+```{r}
+lda <- train(y~., data = train,
+             method = "lda",
+             metric = "F1",
+             trControl = train.control)
+qda <- train(y~., data = train,
+             method = "qda",
+             metric = "F1",
+             trControl = train.control)
+kable(rbind(cbind(model = "LDA", lda$results[2:3]),
+            cbind(model = "QDA", qda$results[2:3])))
+```
+## Naive Bayes
+The Naive Bayes model was fitted using and not using kernel. The results are shown in the table below.
+```{r}
+naive_bayes <- train(y~., data = train,
+             method = "naive_bayes",
+             metric = "F1",
+             trControl = train.control)
+kable(cbind(model = "Naive_bayes", naive_bayes$results))
+```
+## KNN
+The k-nearest-neighbors model was fit. As a first approach, the grid used to tune the value of *k* was ```seq(1, 51, by=2)```. The results are shown in the plot. From it, it is possible to see that the best values of *k* are between 2 and 20. Because of this, another grid was used to tune.
+```{r}
+knn <- train(y~., data = train,
+             method = "knn",
+             metric = "F1",
+             tuneGrid = data.frame(k = seq(1, 51, by=2)),
+             trControl = train.control)
+ggplot(knn$results, aes(x = k, y = F1))+
+  geom_point()+theme_bw()
+```
+After changing the grid, the best value of *k* is 5. The results are shown in the plot.
+```{r}
+knn <- train(y~., data = train,
+             method = "knn",
+             metric = "F1",
+             tuneGrid = data.frame(k = 2:20),
+             trControl = train.control)
+ggplot(knn$results, aes(x = k, y = F1))+
+  geom_point()+theme_bw()
+
+```
+
+## GamLoess
+The Generalized Additive Model using LOESS was fitted to the train data. The parameter values used are shown in the table.
+```{r}
+gamLoess <- train(y~., data = train,
+                  method = "gamLoess",
+                  metric = "F1",
+                  trControl = train.control)
+kable(gamLoess$results)
+```
+
+## Classification tree
+A classification tree was fitted, with the complexity parameter varying in ```seq(0, 0.05, 0.002)```. After the validation, the best tune is reached with $cp = 0.012$.
+```{r}
+rpart <- train(y~., data = train,
+               method = "rpart",
+               metric = "F1",
+               tuneGrid = data.frame(cp = seq(0, 0.05, 0.002)),
+               trControl = train.control)
+ggplot(rpart$results, aes(x=cp, y=F1))+
+  geom_point()+
+  theme_bw()
+```
+
+## Random forest
+Then, a random forest was fitted, with the number of predictors varying from 1 to 9. The results are shown below, with the best tune being $mtry = 2$.
+```{r}
+rf <- train(y~., data = train,
+            method = "rf",
+            metric = "F1",
+            tuneGrid = data.frame(mtry = 1:9),
+            trControl = train.control)
+ggplot(rf$results, aes(x=mtry, y=F1))+
+  geom_point()+
+  theme_bw()
+```
+
+## Gradient Boosting
+The Stochastic Gradient Boosting was fitted to the data, firstly using a grid with the number of trees in ```c(100,500,1000)```, the maximum number of nodes in each tree equal 1 or 2, shrinkage in ```c(0.01,0.05,0.1)``` and minimal terminal node size equals 10 or 20. From the results, it can be seen that $ntrees = 1000$ (maximum) is the best tune. Thus, another grid was built.
+```{r }
+output <- capture.output(gbm <- train(y~., data = train,
+             method = "gbm",
+             metric = "F1",
+             tuneGrid = data.frame(expand_grid(
+               n.trees = c(100, 500, 1000),
+               interaction.depth = 1:3,
+               shrinkage = c(0.01,0.05,0.1,0.15),
+               n.minobsinnode = c(10,20,30)
+             )),
+             trControl = train.control))
+kable(gbm$results %>% arrange(-F1) %>% head())
+```
+Based on this new grid, one can see that the best tune values were found: $shrinkage = 0.1$, $interaction.depth=3$, $n.minobsinnode=20$ and $n.trees = 1000$ or $interaction.depth=2$, $n.minobsinnode=10$ and $n.trees = 2000$, meaning that these values are very similar, but better than the first ones used.
+```{r }
+output <- capture.output(gbm <- train(y~., data = train,
+             method = "gbm",
+             metric = "F1",
+             tuneGrid = data.frame(expand_grid(
+               n.trees = seq(1000,2500, by = 500),
+               interaction.depth = 2:4,
+               shrinkage = seq(0.05, 0.15, by = 0.05),
+               n.minobsinnode = c(10, 20)
+             )),
+             trControl = train.control))
+kable(gbm$results %>% arrange(-F1) %>% head())
+```
+
+## SVM
+Then, Support Vector Machines with different kernels were fitted. Firstly, was used a Linear Kernel, with the best value of the cost being 1.
+```{r}
+svmLinear <- train(y~., data = train,
+                   method = "svmLinear", 
+                   metric = "F1",
+                   tuneGrid = expand.grid(C = seq(0.1, 2, by = 0.1)),
+                   trControl = train.control)
+ggplot(svmLinear$results, aes(x=C, y = F1))+
+  geom_point()+
+  theme_bw()
+```
+Then, the Radial Basis Function Kernel was used. The best result was achieved with $sigma=0.1$ and $cost =1.7$.
+```{r}
+svmRadial <- train(y~., data = train,
+                   method = "svmRadial", 
+                   metric = "F1",
+                   tuneGrid = expand.grid(
+                     sigma = c(0.1, 0.2),
+                     C = seq(0.1, 2, by = 0.1)),
+                   trControl = train.control)
+ggplot(svmRadial$results, aes(x=C, y = F1, color = factor(sigma)))+
+  geom_point()+
+  theme_bw()
+```
+Finally, a Polynomial Kernel was used to fit the model. The best tune is with $degree=1$, $scale = 0.1$ and $cost =0.9$.
+```{r}
+svmPoly <- train(y~., data = train,
+                   method = "svmPoly", 
+                   metric = "F1",
+                   tuneGrid = expand.grid(
+                     degree = 1:2,
+                     scale = c(0.1,0.01, 0.001),
+                     C = seq(0.1, 2, by = 0.1)),
+                   trControl = train.control)
+kable(svmPoly$results %>% arrange(-F1) %>% head(5))
+```
+
+## Ensembles
+After adjusting all the models, some ensembles were considered: one with all models, only GLMs, all but GLMs (caret models) and the 3, 5 and 9 best caret models. 
+```{r}
+models <- c("cloglog", "logit", "probit",
+            "cloglog2", "logit2", "probit2",
+            "gamLoess", "gbm", "knn","lda", 
+            "naive_bayes", "qda", "rf", "rpart", 
+            "svmLinear", "svmPoly", "svmRadial")
+models_caret <- models[7:length(models)]
+F1s <- sapply(models_caret, function(model) (eval(parse(text = model))$results %>% arrange(-F1))[1,"F1"])
+which.max(F1s)
+all <- models
+all_caret <- models_caret
+all_glm <- c("logit", "probit", "cloglog",
+             "cloglog2", "logit2", "probit2")
+top_3 <- names(F1s[order(F1s, decreasing = TRUE)[1:3]])
+top_5 <- names(F1s[order(F1s, decreasing = TRUE)[1:5]])
+top_9 <- names(F1s[order(F1s, decreasing = TRUE)[1:9]])
+```
+# Evaluating in the test set
+After training all the models and tuning their parameters in the training set, 
+```{r}
+preds <- sapply(models, function(mod){
+  if(mod %in% models_caret){
+  predict(eval(parse(text = mod)), newdata = test)}
+  else ifelse(predict(eval(parse(text = mod)), newdata = test, 
+               type = "response")>0.5, 2,1)
+})
+
+cms <- apply(preds, 2, function(pred){
+  confusionMatrix(factor(pred,
+                         levels = c(1,2),
+                         labels = c("M", "B")), test$y)
+  })
+names(cms) <- models
+metrics <- sapply(cms, function(cm){
+  c(cm$overall["Accuracy"], 
+    cm$byClass["Sensitivity"],
+    cm$byClass["Specificity"],
+    cm$byClass["Balanced Accuracy"],
+    cm$byClass["F1"])
+})
+t(metrics)
+apply(t(metrics), 2, function(x)which.max(x))
+t(metrics)[which.max(t(metrics)[,5]),]
+cms[[which.max(t(metrics)[,5])]]
+```
+
+```{r}
+# Ensembles
+ensembles <- c('all', 'all_caret', 'all_glm',
+               'top_3', 'top_5', 'top_9')
+preds_e <- sapply(ensembles, function(x){
+  mods <- eval(parse(text = x))
+  ifelse(rowMeans(preds[, mods]==1)>0.5, 1,2)
+})
+cms_e <- apply(preds_e, 2, function(pred){
+  confusionMatrix(factor(pred,
+                         levels = c(1,2),
+                         labels = c("M", "B")), test$y)
+  })
+names(cms_e) <- ensembles
+metrics_e <- sapply(cms_e, function(cm){
+  c(cm$overall["Accuracy"], 
+    cm$byClass["Sensitivity"],
+    cm$byClass["Specificity"],
+    cm$byClass["Balanced Accuracy"],
+    cm$byClass["F1"])
+})
+t(metrics_e)
+apply(t(metrics_e), 2, function(x)which.max(x))
+cms_e[[which.max(t(metrics_e)[,5])]]
+```
+
+```{r}
+data.frame(rbind(t(metrics), t(metrics_e))) %>% 
+  arrange(-F1)
+```
+
+```{r}
+a <- rbind(t(metrics)[which.max(t(metrics)[,5]),],
+      t(metrics_e)[which.max(t(metrics_e)[,5]),])
+rownames(a) <- c(names(which.max(t(metrics)[,5])),
+                 names(which.max(t(metrics_e)[,5])))
+a %>% kable()
+```
+
